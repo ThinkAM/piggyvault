@@ -1,26 +1,29 @@
-import 'dart:async';
-
-import 'package:flutter/material.dart';
+import 'package:auto_size_text/auto_size_text.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_neumorphic/flutter_neumorphic.dart';
 import 'package:intl/intl.dart';
-import 'package:piggy_flutter/blocs/bloc_provider.dart';
-import 'package:piggy_flutter/blocs/user_bloc.dart';
+import 'package:piggy_flutter/blocs/auth/auth.dart';
+import 'package:piggy_flutter/blocs/transaction/transaction.dart';
+import 'package:piggy_flutter/blocs/transaction_comments/bloc.dart';
+import 'package:piggy_flutter/blocs/transaction_detail/bloc.dart';
 import 'package:piggy_flutter/models/transaction.dart';
-import 'package:piggy_flutter/models/transaction_comment.dart';
-import 'package:piggy_flutter/models/user.dart';
-import 'package:piggy_flutter/screens/transaction/transaction_detail_bloc.dart';
+import 'package:piggy_flutter/repositories/repositories.dart';
 import 'package:piggy_flutter/screens/transaction/transaction_form.dart';
-import 'package:piggy_flutter/utils/api_subscription.dart';
 import 'package:piggy_flutter/utils/common.dart';
+import 'package:piggy_flutter/widgets/common/common.dart';
 import 'package:piggy_flutter/widgets/primary_color_override.dart';
 
 class TransactionDetailPage extends StatefulWidget {
-  final Transaction transaction;
+  final TransactionDetailBloc transactionDetailBloc;
+  final Transaction? transaction;
 
-  TransactionDetailPage({Key key, this.transaction}) : super(key: key);
+  const TransactionDetailPage(
+      {Key? key, this.transaction, required this.transactionDetailBloc})
+      : super(key: key);
 
   @override
   TransactionDetailPageState createState() {
-    return new TransactionDetailPageState();
+    return TransactionDetailPageState();
   }
 }
 
@@ -28,55 +31,81 @@ class TransactionDetailPageState extends State<TransactionDetailPage> {
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   final _formatter = DateFormat("EEE, MMM d, ''yy");
   final _commentTimeFormatter = DateFormat("h:mm a, EEE, MMM d, ''yy");
-  final TextEditingController _commentController = new TextEditingController();
-  TransactionDetailBloc _bloc;
-  StreamSubscription _apiStreamSubscription;
+  final TextEditingController _commentController = TextEditingController();
+  TransactionCommentsBloc? transactionCommentsBloc;
 
   @override
   void initState() {
+    transactionCommentsBloc = TransactionCommentsBloc(
+        transactionRepository:
+            RepositoryProvider.of<TransactionRepository>(context));
+
+    transactionCommentsBloc!
+        .add(LoadTransactionComments(transactionId: widget.transaction!.id!));
     super.initState();
-    _bloc = TransactionDetailBloc(widget.transaction);
-    _apiStreamSubscription = apiSubscription(
-        stream: _bloc.state, context: context, key: _scaffoldKey);
   }
 
   @override
   Widget build(BuildContext context) {
-    final UserBloc userBloc = BlocProvider.of<UserBloc>(context);
     final ThemeData theme = Theme.of(context);
 
-    return Scaffold(
-      key: _scaffoldKey,
-      appBar: AppBar(
-        title: Text('Transaction Details'),
+    return NeumorphicTheme(
+      themeMode: ThemeMode.light,
+      theme: const NeumorphicThemeData(
+        lightSource: LightSource.topLeft,
+        accentColor: NeumorphicColors.accent,
+        appBarTheme: NeumorphicAppBarThemeData(
+          buttonStyle: NeumorphicStyle(boxShape: NeumorphicBoxShape.circle()),
+          textStyle: TextStyle(color: Colors.black54),
+          iconTheme: IconThemeData(color: Colors.black54, size: 30),
+        ),
+        depth: 4,
+        intensity: 0.9,
       ),
-      body: ListView(
-        padding: const EdgeInsets.only(top: 8.0, left: 8.0, right: 8.0),
-        children: <Widget>[
-          _transactionDetails(),
-          ListTile(
-            title: Text(
-              'Comments',
-              style: Theme.of(context).textTheme.headline,
-            ),
+      child: Scaffold(
+        key: _scaffoldKey,
+        appBar: NeumorphicAppBar(
+          title: const Text('Transaction Details'),
+        ),
+        body: BlocListener<TransactionDetailBloc, TransactionDetailState>(
+          listener: (context, state) {
+            if (state is TransactionDeleting) {
+              showProgress(context);
+            }
+
+            if (state is TransactionDeleted) {
+              hideProgress(context);
+              Navigator.of(context).pop();
+            }
+          },
+          child: ListView(
+            padding: const EdgeInsets.only(top: 8.0, left: 8.0, right: 8.0),
+            children: <Widget>[
+              _transactionDetails(),
+              ListTile(
+                title: Text(
+                  'Comments',
+                  style: Theme.of(context).textTheme.headline5,
+                ),
+              ),
+              _commentTile(),
+              _transactionComments(),
+            ],
           ),
-          _commentTile(),
-          _transactionComments(),
-        ],
+        ),
+        bottomNavigationBar: _bottomNavigationBar(theme),
       ),
-      bottomNavigationBar: _bottomNavigationBar(userBloc, theme),
     );
   }
 
-  Widget _bottomNavigationBar(UserBloc bloc, ThemeData theme) {
-    final TextStyle dialogTextStyle =
-        theme.textTheme.subhead.copyWith(color: theme.textTheme.caption.color);
-    return StreamBuilder<User>(
-      stream: bloc.user,
-      builder: (context, snapshot) {
-        if (snapshot.hasData) {
+  Widget _bottomNavigationBar(ThemeData theme) {
+    final TextStyle dialogTextStyle = theme.textTheme.subtitle1!
+        .copyWith(color: theme.textTheme.caption!.color);
+    return BlocBuilder<AuthBloc, AuthState>(
+      builder: (context, state) {
+        if (state is AuthAuthenticated) {
           // Hide actions if transaction created by another user
-          return widget.transaction.creatorUserName == snapshot.data.userName
+          return widget.transaction!.creatorUserName == state.user!.userName
               ? BottomAppBar(
                   child: Row(
                     children: <Widget>[
@@ -88,6 +117,8 @@ class TransactionDetailPageState extends State<TransactionDetailPage> {
                             MaterialPageRoute(
                               builder: (BuildContext context) =>
                                   TransactionFormPage(
+                                transactionsBloc:
+                                    BlocProvider.of<TransactionBloc>(context),
                                 transaction: widget.transaction,
                                 title: 'Edit Transaction',
                               ),
@@ -104,6 +135,8 @@ class TransactionDetailPageState extends State<TransactionDetailPage> {
                             MaterialPageRoute(
                               builder: (BuildContext context) =>
                                   TransactionFormPage(
+                                transactionsBloc:
+                                    BlocProvider.of<TransactionBloc>(context),
                                 transaction: widget.transaction,
                                 title: 'Copy Transaction',
                                 isCopy: true,
@@ -118,19 +151,19 @@ class TransactionDetailPageState extends State<TransactionDetailPage> {
                         onPressed: () {
                           showDeleteConfirmationDialog<DialogAction>(
                               context: context,
-                              child: new AlertDialog(
+                              child: AlertDialog(
                                   title: const Text('Delete Transaction?'),
-                                  content: new Text(
-                                      'Are you sure you want to delete transaction with description "${widget.transaction.description}" and amount ${widget.transaction.amount.toString()}${widget.transaction.accountCurrencySymbol}',
+                                  content: Text(
+                                      'Are you sure you want to delete transaction "${widget.transaction!.description}" of ${widget.transaction!.amount.toMoney()}${widget.transaction!.accountCurrencySymbol}',
                                       style: dialogTextStyle),
                                   actions: <Widget>[
-                                    new FlatButton(
+                                    TextButton(
                                         child: const Text('CANCEL'),
                                         onPressed: () {
                                           Navigator.pop(
                                               context, DialogAction.disagree);
                                         }),
-                                    new FlatButton(
+                                    TextButton(
                                         child: const Text('DELETE'),
                                         onPressed: () {
                                           Navigator.pop(
@@ -144,80 +177,77 @@ class TransactionDetailPageState extends State<TransactionDetailPage> {
                 )
               : const SizedBox.shrink();
         } else {
-          return new Container();
+          return Container();
         }
       },
     );
   }
 
   void dispose() {
-    _bloc?.dispose();
-    _commentController?.dispose();
-    _apiStreamSubscription?.cancel();
+    _commentController.dispose();
     super.dispose();
   }
 
-  void showDeleteConfirmationDialog<T>({BuildContext context, Widget child}) {
+  void showDeleteConfirmationDialog<T>(
+      {required BuildContext context, Widget? child}) {
     showDialog<T>(
       context: context,
-      builder: (BuildContext context) => child,
-    ).then<void>((T value) {
+      builder: (BuildContext context) => child!,
+    ).then<void>((T? value) {
       // The value passed to Navigator.pop() or null.
       if (value == DialogAction.agree) {
-        _bloc.deleteTransaction();
+        widget.transactionDetailBloc
+            .add(DeleteTransaction(transactionId: widget.transaction!.id!));
       }
     });
   }
 
   Widget _commentTile() {
-    return StreamBuilder<String>(
-      stream: _bloc.comment,
-      builder: (context, snapshot) {
-        return ListTile(
-          title: PrimaryColorOverride(
-            child: TextField(
-              controller: _commentController,
-              decoration: new InputDecoration(
-                  labelText: 'Write a comment...', errorText: snapshot.error),
-              onChanged: _bloc.changeComment,
-            ),
+    return ListTile(
+      title: PrimaryColorOverride(
+        child: TextField(
+          controller: _commentController,
+          decoration: const InputDecoration(
+            labelText: 'Write a comment...',
+            // errorText: snapshot.error
           ),
-          trailing: new OutlineButton(
-            onPressed: (() {
-              if (snapshot.hasData && snapshot.data != null) {
-                _bloc.submitComment(widget.transaction.id);
-                _commentController.clear();
-              }
-            }),
-            borderSide: BorderSide.none,
-            child: Text("Post", style: Theme.of(context).textTheme.button),
-          ),
-        );
-      },
+        ),
+      ),
+      trailing: OutlinedButton(
+        onPressed: (() {
+          transactionCommentsBloc!.add(PostTransactionComment(
+              transactionId: widget.transaction!.id!,
+              comment: _commentController.text));
+          _commentController.clear();
+        }),
+        style: OutlinedButton.styleFrom(side: BorderSide.none),
+        child: Text("Post", style: Theme.of(context).textTheme.button),
+      ),
     );
   }
 
   Widget _transactionComments() {
-    return StreamBuilder<List<TransactionComment>>(
-        stream: _bloc.transactionComments,
-        builder: (context, snapshot) {
-          if (snapshot.hasData) {
+    return BlocBuilder(
+        bloc: transactionCommentsBloc,
+        builder: (context, dynamic state) {
+          if (state is TransactionCommentsLoaded) {
             return Card(
               child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: snapshot.data.map((comment) {
+                  children: state.comments.map((comment) {
                     return ListTile(
                       leading: const CircleAvatar(),
-                      title: Text(comment.creatorUserName),
-                      subtitle: Text(comment.content),
-                      trailing: Text(
-                          '${_commentTimeFormatter.format(DateTime.parse(comment.creationTime))}'),
+                      title: Text(comment.creatorUserName!),
+                      subtitle: Text(comment.content!),
+                      trailing: Text(_commentTimeFormatter
+                          .format(DateTime.parse(comment.creationTime!))),
                     );
                   }).toList()),
             );
           } else {
-            return LinearProgressIndicator();
+            return const LinearProgressIndicator();
           }
+          // TODO: handle transaction comments error
         });
   }
 
@@ -228,30 +258,32 @@ class TransactionDetailPageState extends State<TransactionDetailPage> {
         children: <Widget>[
           ListTile(
             leading: const Icon(Icons.category),
-            title: Text(widget.transaction.categoryName),
+            title: Text(widget.transaction!.categoryName!),
           ),
           ListTile(
             leading: const Icon(Icons.attach_money),
             title: Text(
-                '${widget.transaction.amount.toString()} ${widget.transaction.accountCurrencySymbol}'),
+                '${widget.transaction!.amount.toMoney()} ${widget.transaction!.accountCurrencySymbol}'),
           ),
           ListTile(
             leading: const Icon(Icons.event_note),
-            subtitle: Text(widget.transaction.description),
-            isThreeLine: true,
+            title: AutoSizeText(
+              widget.transaction!.description!,
+              maxLines: 3,
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.access_time),
-            title: Text(
-                '${_formatter.format(DateTime.parse(widget.transaction.transactionTime))}'),
+            title: Text(_formatter
+                .format(DateTime.parse(widget.transaction!.transactionTime!))),
           ),
           ListTile(
             leading: const Icon(Icons.account_balance_wallet),
-            title: Text(widget.transaction.accountName),
+            title: Text(widget.transaction!.accountName!),
           ),
           ListTile(
             leading: const Icon(Icons.account_circle),
-            title: Text(widget.transaction.creatorUserName),
+            title: Text(widget.transaction!.creatorUserName!),
           ),
         ],
       ),

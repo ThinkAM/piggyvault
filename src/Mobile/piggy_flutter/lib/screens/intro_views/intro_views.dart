@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:piggy_flutter/blocs/auth/auth.dart';
 import 'package:piggy_flutter/intro_views/Models/page_view_model.dart';
 import 'package:piggy_flutter/intro_views/intro_views_flutter.dart';
-import 'package:piggy_flutter/screens/login/login_page.dart';
 import 'package:piggy_flutter/utils/uidata.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -13,9 +14,7 @@ setAccess() async {
 }
 
 class IntroViews extends StatelessWidget {
-  IntroViews(
-      {Key key})
-      : super(key: key);
+  IntroViews({Key? key}) : super(key: key);
 
   //making list of pages needed to pass in IntroViewsFlutter constructor.
   final pages = [
@@ -75,47 +74,18 @@ class IntroViews extends StatelessWidget {
   Widget build(BuildContext context) {
     setAccess();
 
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'IntroViews Flutter', //title of app
-      theme: ThemeData(
-        primarySwatch: Colors.blue,
-      ), //ThemeData
-      home: Builder(
-        builder: (context) => IntroViewsFlutter(
-          pages,
-          showNextButton: true,
-          showBackButton: true,
-          onTapDoneButton: () {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(
-                builder: (context) => LoginPage(),
-              ), //MaterialPageRoute
-            );
-          },
-          pageButtonTextStyles: TextStyle(
-            color: Colors.white,
-            fontSize: 18.0,
-          ),
-        ), //IntroViewsFlutter
-      ), //Builder
+    return IntroViewsFlutter(
+      pages,
+      showNextButton: true,
+      showBackButton: true,
+      onTapDoneButton: () {
+        BlocProvider.of<AuthBloc>(context).add(AppStarted());
+      },
+      pageButtonTextStyles: TextStyle(
+        color: Colors.white,
+        fontSize: 18.0,
+      ),
+      //Builder
     ); //Material App
   }
 }
-
-// /// Home Page of our example app.
-
-// class HomePage extends StatelessWidget {
-//   @override
-//   Widget build(BuildContext context) {
-//     return Scaffold(
-//       appBar: AppBar(
-//         title: Text('Home'),
-//       ), //Appbar
-//       body: Center(
-//         child: Text("This is the home page of the app"),
-//       ), //Center
-//     ); //Scaffold
-//   }
-// }

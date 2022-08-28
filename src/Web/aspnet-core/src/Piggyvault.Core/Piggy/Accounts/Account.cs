@@ -41,6 +41,7 @@ namespace Piggyvault.Piggy.Accounts
         /// <summary>
         /// Gets or sets the name.
         /// </summary>
+        [Required]
         [MaxLength(MaxNameLength)]
         public virtual string Name { get; set; }
 
@@ -48,5 +49,7 @@ namespace Piggyvault.Piggy.Accounts
         /// Gets or sets the tenant id.
         /// </summary>
         public virtual int TenantId { get; set; }
+
+        public virtual bool IsArchived { get; set; }
     }
 }

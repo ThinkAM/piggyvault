@@ -1,8 +1,4 @@
-﻿using System.Collections.Generic;
-using System.Linq;
-using System.Text.RegularExpressions;
-using System.Threading.Tasks;
-using Abp.Application.Services;
+﻿using Abp.Application.Services;
 using Abp.Application.Services.Dto;
 using Abp.Authorization;
 using Abp.Domain.Entities;
@@ -13,14 +9,19 @@ using Abp.Linq.Extensions;
 using Abp.Localization;
 using Abp.Runtime.Session;
 using Abp.UI;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 using Piggyvault.Authorization;
 using Piggyvault.Authorization.Accounts;
 using Piggyvault.Authorization.Roles;
 using Piggyvault.Authorization.Users;
+using Piggyvault.Configuration;
 using Piggyvault.Roles.Dto;
 using Piggyvault.Users.Dto;
-using Microsoft.AspNetCore.Identity;
-using Microsoft.EntityFrameworkCore;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 
 namespace Piggyvault.Users
 {
@@ -50,6 +51,26 @@ namespace Piggyvault.Users
             _passwordHasher = passwordHasher;
             _abpSession = abpSession;
             _logInManager = logInManager;
+        }
+
+        public async Task ChangeDefaultCurrency(ChangeUserDefaultCurrencyDto input)
+        {
+            await SettingManager.ChangeSettingForUserAsync(
+               AbpSession.ToUserIdentifier(),
+               AppSettingNames.DefaultCurrency,
+               input.CurrencyCode
+           );
+        }
+
+        public async Task<UserSettingsDto> GetSettings()
+
+        {
+            var output = new UserSettingsDto
+            {
+                DefaultCurrencyCode = await SettingManager.GetSettingValueAsync(AppSettingNames.DefaultCurrency)
+            };
+
+            return output;
         }
 
         public override async Task<UserDto> CreateAsync(CreateUserDto input)
@@ -97,6 +118,24 @@ namespace Piggyvault.Users
         {
             var user = await _userManager.GetUserByIdAsync(input.Id);
             await _userManager.DeleteAsync(user);
+        }
+
+        [AbpAuthorize(PermissionNames.Pages_Users_Activation)]
+        public async Task Activate(EntityDto<long> user)
+        {
+            await Repository.UpdateAsync(user.Id, async (entity) =>
+            {
+                entity.IsActive = true;
+            });
+        }
+
+        [AbpAuthorize(PermissionNames.Pages_Users_Activation)]
+        public async Task DeActivate(EntityDto<long> user)
+        {
+            await Repository.UpdateAsync(user.Id, async (entity) =>
+            {
+                entity.IsActive = false;
+            });
         }
 
         public async Task<ListResultDto<RoleDto>> GetRoles()
@@ -222,7 +261,5 @@ namespace Piggyvault.Users
 
             return true;
         }
-
     }
 }
-

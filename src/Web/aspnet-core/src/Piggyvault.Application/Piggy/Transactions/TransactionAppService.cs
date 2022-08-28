@@ -1,14 +1,15 @@
-﻿using Abp.Application.Services.Dto;
-using Abp.Authorization;
+﻿using Abp.Authorization;
 using Abp.AutoMapper;
+using Abp.BackgroundJobs;
 using Abp.Domain.Repositories;
 using Abp.Extensions;
-using Code.Library;
+using Code.Library.Extensions;
 using Microsoft.EntityFrameworkCore;
-using Piggyvault.Notifications;
-using Piggyvault.Notifications.Dto;
+using Microsoft.Extensions.Options;
 using Piggyvault.Piggy.Accounts;
-using Piggyvault.Piggy.CurrencyRateExchange;
+using Piggyvault.Piggy.CurrencyRates;
+using Piggyvault.Piggy.Notifications;
+using Piggyvault.Piggy.Notifications.Dto;
 using Piggyvault.Piggy.Transactions.Dto;
 using Piggyvault.Sessions;
 using System;
@@ -30,20 +31,24 @@ namespace Piggyvault.Piggy.Transactions
         /// </summary>
         private readonly IRepository<Account, Guid> _accountRepository;
 
-        private readonly ICurrencyRateExchangeAppService _currencyRateExchangeService;
-        private readonly INotificationAppService _notificationService;
+        private readonly IBackgroundJobManager _backgroundJobManager;
+        private readonly ICurrencyRateAppService _currencyRateExchangeService;
         private readonly ISessionAppService _sessionAppService;
+        private readonly PiggySettings _settings;
         private readonly IRepository<TransactionComment, Guid> _transactionCommentRepository;
         private readonly IRepository<Transaction, Guid> _transactionRepository;
 
-        public TransactionAppService(IRepository<Transaction, Guid> transactionRepository, IRepository<Account, Guid> accountRepository, ISessionAppService sessionAppService, ICurrencyRateExchangeAppService currencyRateExchangeService, IRepository<TransactionComment, Guid> transactionCommentRepository, INotificationAppService notificationService)
+        public TransactionAppService(IRepository<Transaction, Guid> transactionRepository, IRepository<Account, Guid> accountRepository,
+            ISessionAppService sessionAppService, ICurrencyRateAppService currencyRateExchangeService,
+            IRepository<TransactionComment, Guid> transactionCommentRepository, IOptions<PiggySettings> settings, IBackgroundJobManager backgroundJobManager)
         {
             _transactionRepository = transactionRepository;
             _accountRepository = accountRepository;
             _sessionAppService = sessionAppService;
             _currencyRateExchangeService = currencyRateExchangeService;
             _transactionCommentRepository = transactionCommentRepository;
-            _notificationService = notificationService;
+            _settings = settings.Value;
+            _backgroundJobManager = backgroundJobManager;
         }
 
         /// <summary>
@@ -132,7 +137,8 @@ namespace Piggyvault.Piggy.Transactions
 
             foreach (var transaction in tenantTransactions)
             {
-                var currencyConversionRate = _currencyRateExchangeService.GetCurrencyConversionRate(transaction);
+                var currencyConversionRate = await _currencyRateExchangeService.GetExchangeRate(transaction.Account.Currency.Code);
+
                 if (transaction.Amount > 0)
                 {
                     tenantIncome += transaction.Amount * currencyConversionRate;
@@ -191,7 +197,7 @@ namespace Piggyvault.Piggy.Transactions
 
                 if (lastTransaction != null)
                 {
-                    decimal currencyConversionRate = _currencyRateExchangeService.GetCurrencyConversionRate(lastTransaction);
+                    decimal currencyConversionRate = await _currencyRateExchangeService.GetExchangeRate(lastTransaction.Account.Currency.Code);
 
                     var convertedAmount = lastTransaction.Balance * currencyConversionRate;
 
@@ -306,6 +312,14 @@ namespace Piggyvault.Piggy.Transactions
                     .Where(t => t.AccountId == input.AccountId.Value);
                     break;
 
+                case "category":
+                    query = _transactionRepository.GetAll()
+                        .Include(t => t.Account)
+                        .ThenInclude(account => account.Currency)
+                        .Include(t => t.Category)
+                        .Where(t => t.CategoryId == input.CategoryId.Value);
+                    break;
+
                 default:
                     query = _transactionRepository.GetAll()
                     .Include(t => t.Account)
@@ -342,7 +356,7 @@ namespace Piggyvault.Piggy.Transactions
                                         .ThenByDescending(t => t.CreationTime)
                                         .ToListAsync();
 
-            output.Items = _currencyRateExchangeService.GetTransactionsWithAmountInDefaultCurrency(transactions).ToList();
+            output.Items = (await _currencyRateExchangeService.GetTransactionsWithAmountInDefaultCurrency(transactions)).ToList();
 
             return output;
         }
@@ -379,31 +393,47 @@ namespace Piggyvault.Piggy.Transactions
         /// <param name="transactionId">
         /// The transaction id.
         /// </param>
+        /// <param name="notificationType"></param>
         /// <returns>
         /// The <see cref="Task"/>.
         /// </returns>
-        public async Task SendNotificationAsync(Guid transactionId)
+        public async Task SendNotificationAsync(Guid transactionId, NotificationTypes notificationType)
         {
             var transaction = await _transactionRepository.GetAll()
                 .Include(t => t.Account)
                     .ThenInclude(account => account.Currency)
-                .Include(t => t.Category).Include(t => t.CreatorUser).Where(t => t.Id == transactionId).FirstOrDefaultAsync();
+                .Include(t => t.Category)
+                .Include(t => t.CreatorUser)
+                .Where(t => t.Id == transactionId)
+                .FirstOrDefaultAsync();
 
-            var transactionPreviewDto = transaction.MapTo<TransactionPreviewDto>();
+            var transactionPreviewDto = ObjectMapper.Map<TransactionPreviewDto>(transaction);
 
-            var notificationHeading = transaction.Amount > 0 ? "Inflow" : "Outflow";
+            var contentHeading = transaction.Amount > 0 ? "🐷 Inflow" : "🔥 Outflow";
             var notificationHeadingFromOrTo = transaction.Amount > 0 ? "to" : "from";
-
             var amount = transaction.Amount > 0 ? transaction.Amount : -transaction.Amount;
+            contentHeading += $" of {transaction.Account.Currency.Symbol} {amount} {notificationHeadingFromOrTo} {transaction.CreatorUser.UserName.ToPascalCase()}'s {transaction.Account.Name}";
 
-            notificationHeading += $" of {transaction.Account.Currency.Symbol} {amount} {notificationHeadingFromOrTo} {transaction.CreatorUser.UserName.ToPascalCase()}'s {transaction.Account.Name}";
-
-            await _notificationService.SendPushNotificationAsync(new PushNotificationInput()
+            var notificationHeading = notificationType switch
             {
-                Contents = transaction.Description,
-                Data = GetTransactionDataInDictionary(transactionPreviewDto),
-                Headings = notificationHeading
-            });
+                NotificationTypes.NewTransaction => $"New Transaction By {transaction.CreatorUser.UserName.ToPascalCase()}",
+                NotificationTypes.UpdateTransaction => $"Transaction Updated By {transaction.CreatorUser.UserName.ToPascalCase()}",
+                _ => "New Activity",
+            };
+
+            var currentUser = await _sessionAppService.GetCurrentLoginInformations();
+
+            await _backgroundJobManager.EnqueueAsync<SendPushNotificationJob, SendPushNotificationJobArgs>(
+                new SendPushNotificationJobArgs
+                {
+                    Contents = $"{contentHeading}{Environment.NewLine}{transaction.Description}",
+                    Data = GetTransactionDataInDictionary(transactionPreviewDto),
+                    Headings = notificationHeading,
+                    ChannelId = notificationType == NotificationTypes.NewTransaction
+                        ? _settings.OneSignal.Channels.NewTransaction
+                        : _settings.OneSignal.Channels.UpdateTransaction,
+                    TenancyName = currentUser.Tenant.TenancyName.Trim().ToLowerInvariant()
+                });
         }
 
         public async Task TransferAsync(TransferEditDto input)
@@ -460,82 +490,70 @@ namespace Piggyvault.Piggy.Transactions
             };
         }
 
-        private async Task<Result> CreateTransactionCommentAsync(TransactionCommentEditDto input)
+        private async Task CreateTransactionCommentAsync(TransactionCommentEditDto input)
         {
-            try
-            {
-                var transactionComment = input.MapTo<TransactionComment>();
-                await _transactionCommentRepository.InsertAndGetIdAsync(transactionComment);
-                return await SendTransactionCommentPushNotificationAsync(input);
-            }
-            catch (Exception exception)
-            {
-                return Result.Fail(exception.Message);
-            }
+            var transactionComment = ObjectMapper.Map<TransactionComment>(input);
+            await _transactionCommentRepository.InsertAndGetIdAsync(transactionComment);
+            await SendTransactionCommentPushNotificationAsync(input);
         }
 
-        private async Task InsertTransactionAsync(TransactionEditDto input, bool isTranfer = false)
+        private async Task InsertTransactionAsync(TransactionEditDto input, bool isTransfer = false)
         {
-            var transaction = input.MapTo<Transaction>();
+            var transaction = ObjectMapper.Map<Transaction>(input);
             transaction.Balance = 0;
-            transaction.IsTransferred = isTranfer;
+            transaction.IsTransferred = isTransfer;
 
             var transactionId = await _transactionRepository.InsertAndGetIdAsync(transaction);
             await CurrentUnitOfWork.SaveChangesAsync();
-
             await UpdateTransactionsBalanceInAccountAsync(input.AccountId);
 
-            await this.SendNotificationAsync(transactionId);
+            await SendNotificationAsync(transactionId, NotificationTypes.NewTransaction).ConfigureAwait(false);
         }
 
-        private async Task<Result> SendTransactionCommentPushNotificationAsync(TransactionCommentEditDto input)
+        private async Task SendTransactionCommentPushNotificationAsync(TransactionCommentEditDto input)
         {
-            try
-            {
-                var currentUser = await _sessionAppService.GetCurrentLoginInformations();
+            var currentUser = await _sessionAppService.GetCurrentLoginInformations();
 
-                var transaction = await _transactionRepository.GetAll()
-                    .Include(t => t.Account)
-                        .ThenInclude(account => account.Currency)
-                    .Include(t => t.Category)
-                    .Include(t => t.CreatorUser)
-                    .Where(t => t.Id == input.TransactionId)
-                    .FirstOrDefaultAsync();
+            var transaction = await _transactionRepository.GetAll()
+                .Include(t => t.Account)
+                    .ThenInclude(account => account.Currency)
+                .Include(t => t.Category)
+                .Include(t => t.CreatorUser)
+                .Where(t => t.Id == input.TransactionId)
+                .FirstOrDefaultAsync();
 
-                var transactionPreviewDto = transaction.MapTo<TransactionPreviewDto>();
+            var transactionPreviewDto = ObjectMapper.Map<TransactionPreviewDto>(transaction);
 
-                return await _notificationService.SendPushNotificationAsync(new PushNotificationInput()
+            await _backgroundJobManager.EnqueueAsync<SendPushNotificationJob, SendPushNotificationJobArgs>(
+                new SendPushNotificationJobArgs
                 {
                     Contents = input.Content,
                     Headings = input.Id.HasValue
-                         ? $"{currentUser.User.UserName.ToPascalCase()} updated a comment on a transaction done by {transactionPreviewDto.CreatorUserName}"
-                         : $"New comment added by {currentUser.User.UserName.ToPascalCase()} on a transaction done by {transactionPreviewDto.CreatorUserName}.",
-                    Data = GetTransactionDataInDictionary(transactionPreviewDto)
+                        ? $"{currentUser.User.UserName.ToPascalCase()} updated a comment on a transaction done by {transactionPreviewDto.CreatorUserName}"
+                        : $"New comment added by {currentUser.User.UserName.ToPascalCase()} on a transaction done by {transactionPreviewDto.CreatorUserName}.",
+                    Data = GetTransactionDataInDictionary(transactionPreviewDto),
+                    TenancyName = currentUser.Tenant.TenancyName.Trim().ToLowerInvariant()
                 });
-            }
-            catch (Exception exception)
-            {
-                return Result.Fail(exception.Message);
-            }
         }
 
         private async Task UpdateTransactionAsync(TransactionEditDto input)
         {
             var tenantId = AbpSession.TenantId;
             var transaction = await _transactionRepository.FirstOrDefaultAsync(t => t.Id == input.Id && t.Account.TenantId == tenantId);
-            input.MapTo(transaction);
+            ObjectMapper.Map(input, transaction);
 
             await CurrentUnitOfWork.SaveChangesAsync();
             await UpdateTransactionsBalanceInAccountAsync(input.AccountId);
+            await SendNotificationAsync(transaction.Id, NotificationTypes.UpdateTransaction).ConfigureAwait(false);
         }
 
-        private async Task<Result> UpdateTransactionCommentAsync(TransactionCommentEditDto input)
+        private async Task UpdateTransactionCommentAsync(TransactionCommentEditDto input)
         {
             var transactionComment = await _transactionCommentRepository.FirstOrDefaultAsync(c => c.Id == input.Id.Value);
 
             input.MapTo(transactionComment);
 
-            return await SendTransactionCommentPushNotificationAsync(input);
+            await SendTransactionCommentPushNotificationAsync(input);
         }
 
         private async Task UpdateTransactionsBalanceInAccountAsync(Guid accountId)

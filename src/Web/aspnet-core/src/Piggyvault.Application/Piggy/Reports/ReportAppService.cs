@@ -1,9 +1,8 @@
 ﻿using Abp.Authorization;
-using Abp.AutoMapper;
 using Abp.Domain.Repositories;
-using Code.Library;
+using Code.Library.Extensions;
 using Microsoft.EntityFrameworkCore;
-using Piggyvault.Piggy.CurrencyRateExchange;
+using Piggyvault.Piggy.CurrencyRates;
 using Piggyvault.Piggy.Reports.Dto;
 using Piggyvault.Piggy.Transactions;
 using Piggyvault.Piggy.Transactions.Dto;
@@ -17,31 +16,40 @@ namespace Piggyvault.Piggy.Reports
     [AbpAuthorize]
     public class ReportAppService : PiggyvaultAppServiceBase, IReportAppService
     {
-        private readonly ICurrencyRateExchangeAppService _currencyRateExchangeService;
+        private readonly ICurrencyRateAppService _currencyRateExchangeService;
         private readonly IReportRepository _reportRepository;
         private readonly IRepository<Transaction, Guid> _transactionRepository;
 
-        public ReportAppService(IReportRepository reportRepository, IRepository<Transaction, Guid> transactionRepository, ICurrencyRateExchangeAppService currencyRateExchangeService)
+        public ReportAppService(IReportRepository reportRepository, IRepository<Transaction, Guid> transactionRepository, ICurrencyRateAppService currencyRateExchangeService)
         {
             _reportRepository = reportRepository;
             _transactionRepository = transactionRepository;
             _currencyRateExchangeService = currencyRateExchangeService;
         }
 
-        public async Task<Abp.Application.Services.Dto.ListResultDto<CategoryReportOutputDto>> GetCategoryReport(GetCategoryReportInput input)
+        public async Task<Abp.Application.Services.Dto.ListResultDto<CategoryReportListDto>> GetCategoryReport(GetCategoryReportRequestDto input)
         {
-            return await _reportRepository.GetCategoryReport(input);
+            var items = await _reportRepository.GetCategoryReport(new GetCategoryReportInput
+            {
+                StartDate = input.StartDate,
+                EndDate = input.EndDate,
+                UserId = AbpSession.UserId.Value
+            });
+
+            var output = ObjectMapper.Map<List<CategoryReportListDto>>(items.Items);
+
+            foreach (var dto in output)
+            {
+                dto.AmountInDefaultCurrency =
+                    (await _currencyRateExchangeService.GetExchangeRate(dto.CurrencyCode)) * dto.Amount;
+            }
+
+            return new Abp.Application.Services.Dto.ListResultDto<CategoryReportListDto>(output);
         }
 
         /// <summary>
         /// The get category wise transaction summary history.
         /// </summary>
-        /// <param name="input">
-        /// The input.
-        /// </param>
-        /// <returns>
-        /// The <see cref="Task"/>.
-        /// </returns>
         public async Task<Abp.Application.Services.Dto.ListResultDto<GetCategoryWiseTransactionSummaryHistoryOuputDto>> GetCategoryWiseTransactionSummaryHistory(GetCategoryWiseTransactionSummaryHistoryInputDto input)
         {
             var categoryDatasetList = new List<GetCategoryWiseTransactionSummaryHistoryOuputDto>();
@@ -49,7 +57,8 @@ namespace Piggyvault.Piggy.Reports
             var query = _transactionRepository.GetAll()
                       .Include(t => t.Account)
                         .ThenInclude(account => account.Currency)
-                      .Include(t => t.Category).Where(t => !t.IsTransferred).Where(t => t.CreatorUserId == AbpSession.UserId);
+                      .Include(t => t.Category)
+                      .Where(t => !t.IsTransferred && t.CreatorUserId == AbpSession.UserId);
 
             var startDate = DateTime.Today.FirstDayOfMonth().AddMonths(-input.NumberOfIteration);
             var endDate = DateTime.Today.FirstDayOfMonth().AddMonths(1);
@@ -65,7 +74,7 @@ namespace Piggyvault.Piggy.Reports
             {
                 var categoryDto = new GetCategoryWiseTransactionSummaryHistoryOuputDto { CategoryName = category.Name };
 
-                for (int i = 1; i <= input.NumberOfIteration; i++)
+                for (var i = 1; i <= input.NumberOfIteration; i++)
                 {
                     var summaryDto = new TransactionSummaryInGetCategoryWiseTransactionSummaryHistoryOuputDto();
 
@@ -77,8 +86,12 @@ namespace Piggyvault.Piggy.Reports
 
                     var transactions = await newQuery.ToListAsync();
 
-                    summaryDto.Total = transactions.Any() ? transactions.Sum(t => _currencyRateExchangeService.GetAmountInDefaultCurrency(t)) : 0;
-                    summaryDto.Transactions = transactions.MapTo<List<TransactionPreviewDto>>();
+                    foreach (var transaction in transactions)
+                    {
+                        summaryDto.Total += await _currencyRateExchangeService.GetAmountInDefaultCurrency(transaction);
+                    }
+
+                    summaryDto.Transactions = ObjectMapper.Map<List<TransactionPreviewDto>>(transactions);
                     categoryDto.Datasets.Add(summaryDto);
                 }
 
